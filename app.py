@@ -23,41 +23,44 @@ CLIENT_ID = int(os.getenv('CLIENT_ID', 1))
 
 class IBKRTrader:
     def __init__(self):
-        self.ib = IB()
         self.connected = False
     
     async def connect(self):
         """Connect to IBKR for paper trading"""
         try:
-            # Check if already connected
-            if self.ib.isConnected():
-                self.connected = True
-                return True
-                
-            await self.ib.connectAsync(IB_HOST, IB_PORT, clientId=CLIENT_ID)
+            # Create a new IB instance for each connection (serverless friendly)
+            ib = IB()
+            await ib.connectAsync(IB_HOST, IB_PORT, clientId=CLIENT_ID)
             
             # Verify connection is actually established
-            if self.ib.isConnected():
+            if ib.isConnected():
                 self.connected = True
-                return True
+                return ib
             else:
                 self.connected = False
-                return False
+                return None
                 
         except Exception as e:
             logger.error(f"Failed to connect to IBKR: {str(e)}")
             self.connected = False
-            return False
+            return None
     
     async def test_connection(self):
         """Test connection to IBKR and return detailed status"""
+        ib = None
         try:
-            if not self.connected:
-                await self.ib.connectAsync(IB_HOST, IB_PORT, clientId=CLIENT_ID)
-                self.connected = True
+            ib = await self.connect()
+            if not ib:
+                return {
+                    "success": False,
+                    "error": "Failed to establish connection",
+                    "host": IB_HOST,
+                    "port": IB_PORT,
+                    "client_id": CLIENT_ID
+                }
             
             # Test if we can get account summary
-            accounts = self.ib.managedAccounts()
+            accounts = ib.managedAccounts()
             
             return {
                 "success": True,
@@ -71,33 +74,34 @@ class IBKRTrader:
             logger.error(f"Connection test failed: {str(e)}")
             self.connected = False
             return {
-                "success": False
+                "success": False,
+                "error": str(e),
+                "host": IB_HOST,
+                "port": IB_PORT,
+                "client_id": CLIENT_ID
             }
+        finally:
+            if ib and ib.isConnected():
+                ib.disconnect()
     
     async def disconnect(self):
-        """Disconnect from IBKR"""
-        if self.connected:
-            self.ib.disconnect()
-            self.connected = False
+        """Disconnect from IBKR - Not needed in serverless environment"""
+        self.connected = False
     
     async def place_market_order(self, symbol, action, quantity):
         """Place a market order (BUY or SELL)"""
+        ib = None
         try:
-            # Always check if connection is actually working, not just the flag
-            if not self.ib.isConnected():
-                self.connected = False
-                if not await self.connect():
-                    return {"error": "Failed to connect to IBKR"}
-            
-            # Double-check connection is still valid
-            if not self.ib.isConnected():
-                return {"error": "No active connection to IBKR"}
+            # Create new connection for this request
+            ib = await self.connect()
+            if not ib:
+                return {"error": "Failed to connect to IBKR"}
             
             # Create stock contract
             contract = Stock(symbol, 'SMART', 'USD')
             
             # Qualify the contract
-            qualified_contracts = await self.ib.qualifyContractsAsync(contract)
+            qualified_contracts = await ib.qualifyContractsAsync(contract)
             if not qualified_contracts:
                 return {"error": f"Could not qualify contract for symbol {symbol}"}
             
@@ -107,7 +111,7 @@ class IBKRTrader:
             order = MarketOrder(action.upper(), quantity)
             
             # Place the order
-            trade = self.ib.placeOrder(contract, order)
+            trade = ib.placeOrder(contract, order)
             
             # Wait a moment for order to be processed
             await asyncio.sleep(0.1)
@@ -124,9 +128,11 @@ class IBKRTrader:
             
         except Exception as e:
             logger.error(f"Error placing market order: {str(e)}")
-            # Reset connection flag on error
             self.connected = False
             return {"error": str(e)}
+        finally:
+            if ib and ib.isConnected():
+                ib.disconnect()
 
 # Initialize trader
 trader = IBKRTrader()
@@ -135,11 +141,15 @@ trader = IBKRTrader()
 def home():
     return jsonify({
         "message": "Simple IBKR Paper Trading API",
+        "version": "1.0.0",
+        "environment": "vercel" if os.getenv('VERCEL') else "local",
         "endpoints": {
+            "/": "GET - API information",
+            "/health": "GET - Health check",
+            "/status": "GET - Service status",
+            "/test-connection": "GET - Test IBKR connection",
             "/buy": "POST - Place market buy order",
-            "/sell": "POST - Place market sell order", 
-            "/status": "GET - Check connection status",
-            "/test-connection": "GET - Test connection with detailed info"
+            "/sell": "POST - Place market sell order"
         }
     })
 
@@ -147,13 +157,22 @@ def home():
 def status():
     return jsonify({
         "status": "online",
-        "connected_to_ibkr": trader.connected,
+        "environment": "serverless" if os.getenv('VERCEL') else "local",
         "trading_mode": "paper",
         "config": {
             "host": IB_HOST,
             "port": IB_PORT,
             "client_id": CLIENT_ID
         }
+    })
+
+@app.route('/health', methods=['GET'])
+def health():
+    """Simple health check endpoint"""
+    return jsonify({
+        "status": "healthy",
+        "timestamp": str(asyncio.get_event_loop().time()),
+        "environment": "vercel" if os.getenv('VERCEL') else "local"
     })
 
 @app.route('/test-connection', methods=['GET'])
@@ -215,6 +234,9 @@ def sell_stock():
     except Exception as e:
         logger.error(f"Error in sell endpoint: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+# For Vercel deployment
+application = app
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000) 
