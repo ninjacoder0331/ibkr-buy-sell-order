@@ -235,8 +235,10 @@ def sell_stock():
         logger.error(f"Error in sell endpoint: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# For Vercel deployment
-application = app
+
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000) 
+
+# For Vercel deployment
+application = app
